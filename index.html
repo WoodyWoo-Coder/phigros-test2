@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>67BPM 爵士鼓對拍器 (微調補償版)</title>
+    <style>
+        body {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            background-color: #1a1a24;
+            color: white;
+            font-family: sans-serif;
+            margin: 0;
+        }
+        h1 { color: #ffd32a; font-size: 26px; margin-bottom: 5px; }
+        .status { color: #0be881; font-weight: bold; margin-bottom: 20px; font-size: 16px; height: 24px; }
+        
+        .beat-display {
+            font-size: 22px;
+            font-weight: bold;
+            margin-bottom: 30px;
+            color: #a4b0be;
+            background: rgba(0,0,0,0.3);
+            padding: 15px 30px;
+            border-radius: 20px;
+            min-width: 340px;
+            text-align: center;
+            line-height: 1.6;
+        }
+        .highlight { color: #ffd32a; font-size: 28px; }
+        .inst-name { color: #2ed573; font-weight: bold; }
+        .loop-count { color: #ffa502; }
+        .step-grid { font-family: monospace; color: #747d8c; font-size: 16px; margin-top: 5px; }
+
+        .drum-btn {
+            width: 200px;
+            height: 200px;
+            border-radius: 50%;
+            border: 5px solid #ffd32a;
+            background: radial-gradient(circle, #3c40c6, #2c2fa5);
+            color: white;
+            font-size: 22px;
+            font-weight: bold;
+            cursor: pointer;
+            box-shadow: 0 10px 20px rgba(0,0,0,0.4);
+            transition: all 0.05s;
+            outline: none;
+        }
+        .drum-btn:active { transform: scale(0.95); }
+        .drum-btn.playing {
+            background: radial-gradient(circle, #ff3f34, #ea2027);
+            border-color: #ff3f34;
+        }
+        p { color: #a4b0be; margin-top: 20px; text-align: center; line-height: 1.6; }
+    </style>
+</head>
+<body>
+
+    <h1>🥁 67 BPM 爵士鼓對拍器 (微調補償版) 🥁</h1>
+    <div id="status" class="status">音色初始化中...</div>
+    
+    <div id="beatDisplay" class="beat-display">等待啟動</div>
+
+    <button id="drumBtn" class="drum-btn" onclick="toggleSequencer()">啟動對拍</button>
+
+    <p>💡 提示：按空白鍵啟動/停止<br>【時序微調】主音樂已精準往後延遲 0.05 秒進場，確保全環境完美咬合！</p>
+
+    <script>
+        const btn = document.getElementById('drumBtn');
+        const statusDiv = document.getElementById('status');
+        const beatDisplay = document.getElementById('beatDisplay');
+
+        const AudioContext = window.AudioContext || window.webkitAudioContext;
+        let audioCtx = null;
+
+        const soundUrls = {
+            bass: 'https://raw.githubusercontent.com/scratchfoundation/scratch-audio/develop/sound-files/drums/BassDrum(1b)_22k.wav',
+            snare: 'https://raw.githubusercontent.com/scratchfoundation/scratch-audio/develop/sound-files/drums/SnareDrum(1)_22k.wav',
+            hihat: 'https://raw.githubusercontent.com/scratchfoundation/scratch-audio/develop/sound-files/drums/HiHatClosed(1)_22k.wav',
+            cymbal: 'https://raw.githubusercontent.com/scratchfoundation/scratch-audio/develop/sound-files/drums/HiHatOpen(2)_22k.wav',
+            mainMusic: 'https://raw.githubusercontent.com/WoodyWoo-Coder/phigros-test/main/name.wav' 
+        };
+
+        let buffers = { bass: null, snare: null, hihat: null, cymbal: null, mainMusic: null };
+        let isLoaded = false;
+        let isPlaying = false;
+        
+        let animationFrameId = null;
+        let nextStepTime = 0.0;
+        let currentStep = 0; 
+        
+        const bpm = 67;
+        const beatSpeed = 60 / bpm; 
+        const stepSpeed = beatSpeed / 4; 
+        const scheduleAheadTime = 0.1; 
+
+        // ========================================================
+        // 樂器軌道矩陣 (256 格)
+        // ========================================================
+        const bassA = [1,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0]; 
+        const bassB = [0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0]; 
+        const bassC = [1,0,1,0,0,0,0,0,0,0,1,0,0,0,0,0]; 
+        const bassD = [1,0,1,0,0,0,0,0,1,0,1,0,0,0,0,0]; 
+        const bassE = [1,0,1,0,0,0,0,0,1,0,0,1,0,0,0,0]; 
+        const bassFinal = [1,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0]; 
+
+        let bassPattern = [];
+        for(let i=0; i<7; i++) bassPattern = bassPattern.concat(bassA); 
+        bassPattern = bassPattern.concat(bassB);                         
+        for(let i=0; i<2; i++) bassPattern = bassPattern.concat(bassC); 
+        bassPattern = bassPattern.concat(bassD).concat(bassE);           
+        for(let i=0; i<2; i++) bassPattern = bassPattern.concat(bassC); 
+        bassPattern = bassPattern.concat(bassFinal);                     
+        bassPattern = bassPattern.concat([0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]); 
+
+        const snareA = [0,0,0,0,1,0,0,0,0,0,0,0,1,0,0,0]; 
+        const snareB = [0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0]; 
+        const snareC = [0,0,0,0,1,0,0,0,0,1,1,0,1,0,1,0]; 
+
+        let snarePattern = [];
+        for(let i=0; i<7; i++) snarePattern = snarePattern.concat(snareA); 
+        snarePattern = snarePattern.concat(snareB);                         
+        for(let i=0; i<3; i++) snarePattern = snarePattern.concat(snareA); 
+        snarePattern = snarePattern.concat(snareC);                         
+        for(let i=0; i<2; i++) snarePattern = snarePattern.concat(snareA); 
+        for(let i=0; i<2; i++) snarePattern = snarePattern.concat([0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]); 
+
+        const hhStd = [1,0,1,0,1,0,1,0,1,0,1,0,1,0,1,0]; 
+        const hhV1  = [1,0,1,0,1,0,1,0,1,0,1,0,1,0,1,1]; 
+        const hhV2  = [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]; 
+        const hhNo1 = [0,0,1,0,1,0,1,0,1,0,1,0,1,0,1,0]; 
+        const hhV3  = [1,0,1,0,1,0,1,0,1,0,0,0,0,0,0,0]; 
+
+        let hihatPattern = [];
+        for(let i=0; i<6; i++) hihatPattern = hihatPattern.concat(hhStd);
+        hihatPattern = hihatPattern.concat(hhV1).concat(hhV2);
+        hihatPattern = hihatPattern.concat(hhNo1).concat(hhStd).concat(hhStd);
+        hihatPattern = hihatPattern.concat(hhV3);
+        hihatPattern = hihatPattern.concat(hhNo1).concat(hhStd);
+        const hhFinal = [1,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0];
+        hihatPattern = hihatPattern.concat(hhFinal);
+        hihatPattern = hihatPattern.concat([0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]);
+
+        let cymbalPattern = new Array(256).fill(0);
+        cymbalPattern[62] = 2;  
+        cymbalPattern[111] = 2; 
+        cymbalPattern[128] = 1; 
+        cymbalPattern[188] = 1; 
+        cymbalPattern[192] = 1; 
+
+        // 預先載入硬體緩衝區
+        async function initAudioEngine() {
+            if (audioCtx) return;
+            audioCtx = new AudioContext();
+            statusDiv.innerText = '⏳ 正在執行工業級音訊高速下載解碼中...';
+
+            try {
+                const promises = Object.keys(soundUrls).map(async (key) => {
+                    const response = await fetch(soundUrls[key]);
+                    const arrayBuffer = await response.arrayBuffer();
+                    return new Promise((resolve) => {
+                        audioCtx.decodeAudioData(arrayBuffer, (buffer) => {
+                            buffers[key] = buffer;
+                            resolve();
+                        });
+                    });
+                });
+
+                await Promise.all(promises);
+                isLoaded = true;
+                statusDiv.innerText = '✅ 絕對鎖定核心就緒！可以點擊按鈕啟動。';
+            } catch (error) {
+                statusDiv.innerText = '❌ 載入失敗，請確認網路連線或音檔連結是否正常';
+                console.error(error);
+            }
+        }
+
+        function playNode(buffer, time, volume = 1.0) {
+            const source = audioCtx.createBufferSource();
+            const gainNode = audioCtx.createGain();
+            source.buffer = buffer;
+            gainNode.gain.setValueAtTime(volume, time);
+            source.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
+            source.start(time);
+        }
+
+        // 步進時鐘
+        function scheduler() {
+            while (nextStepTime < audioCtx.currentTime + scheduleAheadTime) {
+                scheduleStep(currentStep, nextStepTime);
+                advanceStep();
+            }
+            if (isPlaying) {
+                animationFrameId = requestAnimationFrame(scheduler);
+            }
+        }
+
+        function scheduleStep(step, time) {
+            if (step < 0) {
+                // 預備拍
+                const preStepIndex = step + 16; 
+                if (preStepIndex % 4 === 0) {
+                    playNode(buffers.hihat, time, 0.12);
+                    const currentBeat = Math.floor(preStepIndex / 4) + 1;
+                    setTimeout(() => {
+                        if (!isPlaying) return;
+                        statusDiv.innerText = `⏳ 預備拍絕對對齊中...`;
+                        beatDisplay.innerHTML = `預備拍：<span class="highlight">${currentBeat}</span>`;
+                    }, (time - audioCtx.currentTime) * 1000);
+                }
+            } else {
+                // 正式拍點
+                if (bassPattern[step] === 1) playNode(buffers.bass, time, 1.0);
+                if (snarePattern[step] === 1) playNode(buffers.snare, time, 0.75);
+                if (hihatPattern[step] === 1) playNode(buffers.hihat, time, 0.12);
+                if (cymbalPattern[step] === 1) playNode(buffers.cymbal, time, 0.9);
+                if (cymbalPattern[step] === 2) playNode(buffers.cymbal, time, 0.5);
+
+                if (bassPattern[step] === 1 || snarePattern[step] === 1 || hihatPattern[step] === 1 || cymbalPattern[step] > 0 || step % 4 === 0) {
+                    const currentMeasure = Math.floor(step / 16) + 1;
+                    const stepInMeasure = (step % 16) + 1;
+                    const currentBeatNum = Math.floor(step / 4) + 1;
+
+                    setTimeout(() => {
+                        if (!isPlaying) return;
+                        let activeInst = "──";
+                        let hits = [];
+                        if (bassPattern[step] === 1) hits.push("💥大鼓");
+                        if (snarePattern[step] === 1) hits.push("🥁小鼓");
+                        if (hihatPattern[step] === 1) hits.push("✨HiHat");
+                        if (cymbalPattern[step] > 0) hits.push("📀老銅鈸");
+                        if (hits.length > 0) activeInst = hits.join(" + ");
+
+                        statusDiv.innerText = `🎵 工業級 Master-Slave 絕對鎖定運行中...`;
+                        beatDisplay.innerHTML = `
+                            小節：<span class="loop-count">${currentMeasure}</span> / 16 ── 大拍：<span class="highlight">${currentBeatNum}</span> / 64<br>
+                            當前動作：<span class="inst-name">${activeInst}</span><br>
+                            <div class="step-grid">碎拍網格位置: [第 ${stepInMeasure} / 16 格]</div>
+                        `;
+                    }, (time - audioCtx.currentTime) * 1000);
+                }
+            }
+        }
+
+        function advanceStep() {
+            currentStep++;
+            if (currentStep >= 256) {
+                currentStep = -16; 
+                // ★ 循環播放時也同樣加上 0.05 秒補償
+                const nextMusicTime = nextStepTime + (9 * stepSpeed) + 0.05;
+                playNode(buffers.mainMusic, nextMusicTime, 0.85);
+            }
+            nextStepTime += stepSpeed;
+        }
+
+        async function toggleSequencer() {
+            if (!isLoaded) {
+                await initAudioEngine();
+                return;
+            }
+
+            if (isPlaying) {
+                isPlaying = false;
+                btn.innerText = "啟動對拍";
+                btn.classList.remove("playing");
+                statusDiv.innerText = "⏸ 已強制暫停";
+                beatDisplay.innerHTML = "等待啟動...";
+                cancelAnimationFrame(animationFrameId);
+                
+                if (audioCtx) {
+                    await audioCtx.close();
+                    audioCtx = null;
+                    isLoaded = false;
+                    await initAudioEngine(); 
+                }
+            } else {
+                isPlaying = true;
+                btn.innerText = "停止播放";
+                btn.classList.add("playing");
+                
+                if (audioCtx.state === 'suspended') {
+                    await audioCtx.resume();
+                }
+
+                const baseStartTime = audioCtx.currentTime + 0.05;
+                currentStep = -16; 
+                nextStepTime = baseStartTime;
+                
+                // 🌟【精準微調核心】：原本的第 10 格 (9 * stepSpeed) 再加上 0.05 秒！
+                const firstMusicPlayTime = baseStartTime + (9 * stepSpeed) + 0.05;
+                playNode(buffers.mainMusic, firstMusicPlayTime, 0.85);
+
+                scheduler(); 
+            }
+        }
+
+        window.addEventListener('click', initAudioEngine, { once: true });
+        window.addEventListener('keydown', initAudioEngine, { once: true });
+
+        window.addEventListener('keydown', (e) => {
+            if (e.key === ' ' || e.key === 'Enter') {
+                e.preventDefault();
+                toggleSequencer();
+            }
+        });
+    </script>
+</body>
+</html>
